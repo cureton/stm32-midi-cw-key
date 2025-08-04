@@ -20,17 +20,30 @@ int main(void)
 	delay_init(SYS_CLOCK_MHZ);
 
         rcc_periph_clock_enable(RCC_TIM3);
+        rcc_periph_clock_enable(RCC_TIM4);
         rcc_periph_clock_enable(RCC_GPIOB);
 
-//        timer_set_period(TIM3, 1024);
+	/* Set up timer 3 in enocder mode */
         timer_slave_set_mode(TIM3, 0x3); // encoder
         timer_ic_set_input(TIM3, TIM_IC1, TIM_IC_IN_TI1);
         timer_ic_set_input(TIM3, TIM_IC2, TIM_IC_IN_TI2);
         timer_enable_counter(TIM3);
 
         // Configure PB4 (TIM3_CH1) and PB5 (TIM3_CH2) as AF
-        gpio_mode_setup(GPIOB, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO4 | GPIO5);
+        gpio_mode_setup(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO4 | GPIO5);
         gpio_set_af(GPIOB, GPIO_AF2, GPIO4 | GPIO5);  // AF2 = TIM3
+
+
+	/* Set up timer 4 in enocder mode */
+        timer_slave_set_mode(TIM4, 0x3); // encoder
+        timer_ic_set_input(TIM4, TIM_IC1, TIM_IC_IN_TI1);
+        timer_ic_set_input(TIM4, TIM_IC2, TIM_IC_IN_TI2);
+        timer_enable_counter(TIM4);
+
+
+        // Configure PB6 (TIM4_CH1) and PB7 (TIM4_CH2) as AF
+        gpio_mode_setup(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO6 | GPIO7);
+        gpio_set_af(GPIOB, GPIO_AF2, GPIO6 | GPIO7);  // AF2 = TIM4
 
 
 	/* enable LED (GPIOC, GPIO13) to show the entry of main: */
@@ -55,11 +68,14 @@ int main(void)
 	USB_Serial_write("\nTest finished -> start blinking...");
 
 
-	uint32_t encoder1;
+	uint32_t encoder1, encoder2;
 	while (1)
 	{
 	        encoder1 = timer_get_counter(TIM3);
+	        encoder2 = timer_get_counter(TIM4);
 		USB_Serial_write_u32(encoder1);
+		USB_Serial_write_u32(encoder2);
+		USB_Serial_write("\n");
 		gpio_toggle(GPIOC, GPIO13);
 		delay_ms(300);
 	}
@@ -137,6 +153,15 @@ static void gpio_setup(void)
 	gpio_mode_setup(GPIOC, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO13);
 
 	/* configure USB pins */
+ 	/* Configure Port A Pin 9 as an high-output as VBUS sensing is enabled but 
+           it is not connected to VBUS on the blackpill */
+        /* VBUS sensing can also be disabled in /lib/usb/usb_f107.c by the inclusion of the following 
+           OTG_FS_GCCFG |= OTG_GCCFG_NOVBUSSENS;
+           after setting up the USB OTG registers */
+
+	gpio_mode_setup(GPIOA,  GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO9);
+        gpio_set(GPIOA, GPIO9);
+
 	gpio_mode_setup(GPIOA,  GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO11|GPIO12);
-    gpio_set_af(GPIOA, GPIO_AF10, GPIO11|GPIO12);
+        gpio_set_af(GPIOA, GPIO_AF10, GPIO11|GPIO12);
 }
