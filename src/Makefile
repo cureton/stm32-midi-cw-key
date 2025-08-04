@@ -1,14 +1,18 @@
-PROJECT = awesomesauce
+PROJECT = rotator
 BUILD_DIR = bin
 
-SHARED_DIR = ../my-common-code
-CFILES = my-project.c
-CFILES += api.c
-AFILES += api-asm.S
+SHARED_DIR = 
+CFILES = main.c
+CFILES += delay.c  usbcdc.c  usb_serial.c
+AFILES +=
 
 # TODO - you will need to edit these two lines!
-DEVICE=stm32f407vgt6
-OOCD_FILE = board/stm32f4discovery.cfg
+DEVICE=STM32F411CE
+#OOCD_FILE = board/stm32f4discovery.cfg
+OOCD_INTERFACE = stlink-v2
+OOCD_TARGET = stm32f4x
+
+
 
 # You shouldn't have to edit anything below here.
 VPATH += $(SHARED_DIR)
@@ -18,3 +22,4 @@ OPENCM3_DIR=../libopencm3
 include $(OPENCM3_DIR)/mk/genlink-config.mk
 include ../rules.mk
 include $(OPENCM3_DIR)/mk/genlink-rules.mk
+
