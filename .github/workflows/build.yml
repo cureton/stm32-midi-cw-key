@@ -18,7 +18,7 @@ jobs:
 
     steps:
     - name: Install dependencies
-      run: apt-get update; apt-get install gcc-arm-none-eabi
+      run: apt-get update; apt-get install -y  gcc-arm-none-eabi
 
     - name: Checkout Repositor with submodules 
       uses: actions/checkout@v4
