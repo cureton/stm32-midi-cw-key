@@ -23,7 +23,7 @@ jobs:
     - name: Checkout Repositor with submodules 
       uses: actions/checkout@v4
       with:
-          submodule: recursive
+          submodules: recursive
 
     - name: Build
       run: make -C src
