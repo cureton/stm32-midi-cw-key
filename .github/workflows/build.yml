@@ -24,6 +24,9 @@ jobs:
       uses: actions/checkout@v4
       with:
           submodules: recursive
+          
+    - name: Build libopemcm3 libraries for stm32f4x
+      run: make -C libopencm3 TARGETS=stm32/f4
 
-    - name: Build
+    - name: Build product
       run: make -C src
