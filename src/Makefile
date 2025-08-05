@@ -1,9 +1,9 @@
-PROJECT = rotator
+PROJECT = midi-cw-key
 BUILD_DIR = bin
 
 SHARED_DIR = 
 CFILES = main.c
-CFILES += delay.c  usbcdc.c  usb_serial.c
+CFILES +=
 AFILES +=
 
 # TODO - you will need to edit these two lines!

@@ -1,167 +1,405 @@
+/*
+ * This file is part of the libopencm3 project.
+ *
+ * Copyright (C) 2014 Daniel Thompson <daniel@redfelineninja.org.uk>
+ *
+ * This library is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdlib.h>
+#include <libopencm3/usb/usbd.h>
+#include <libopencm3/usb/audio.h>
+#include <libopencm3/usb/midi.h>
+#include <libopencm3/cm3/scb.h>
+#include <libopencm3/stm32/desig.h>
 #include <libopencm3/stm32/rcc.h>
-#include <libopencm3/stm32/flash.h>
-#include <libopencm3/stm32/timer.h>
+#include <libopencm3/stm32/gpio.h>
 
-#include "delay.h"
-#include "usb_serial.h"
+/*
+ * All references in this file come from Universal Serial Bus Device Class
+ * Definition for MIDI Devices, release 1.0.
+ */
 
-/* preprocessor macros: */
-#define SYS_CLOCK_MHZ (96U) // possible options (84U), (96U), (100U)  NOTE: 100MHz does not support USB
+/*
+ * Table B-1: MIDI Adapter Device Descriptor
+ */
+static const struct usb_device_descriptor dev = {
+	.bLength = USB_DT_DEVICE_SIZE,
+	.bDescriptorType = USB_DT_DEVICE,
+	.bcdUSB = 0x0200,    /* was 0x0110 in Table B-1 example descriptor */
+	.bDeviceClass = 0,   /* device defined at interface level */
+	.bDeviceSubClass = 0,
+	.bDeviceProtocol = 0,
+	.bMaxPacketSize0 = 64,
+	.idVendor = 0x6666,  /* Prototype product vendor ID */
+	.idProduct = 0x5119, /* dd if=/dev/random bs=2 count=1 | hexdump */
+	.bcdDevice = 0x0100,
+	.iManufacturer = 1,  /* index to string desc */
+	.iProduct = 2,       /* index to string desc */
+	.iSerialNumber = 3,  /* index to string desc */
+	.bNumConfigurations = 1,
+};
 
-/* function prototypes: */
-static void clock_setup(void);
-static void gpio_setup(void);
+/*
+ * Midi specific endpoint descriptors.
+ */
+static const struct usb_midi_endpoint_descriptor midi_bulk_endp[] = {{
+	/* Table B-12: MIDI Adapter Class-specific Bulk OUT Endpoint
+	 * Descriptor
+	 */
+	.head = {
+		.bLength = sizeof(struct usb_midi_endpoint_descriptor),
+		.bDescriptorType = USB_AUDIO_DT_CS_ENDPOINT,
+		.bDescriptorSubType = USB_MIDI_SUBTYPE_MS_GENERAL,
+		.bNumEmbMIDIJack = 1,
+	},
+	.jack[0] = {
+		.baAssocJackID = 0x01,
+	},
+}, {
+	/* Table B-14: MIDI Adapter Class-specific Bulk IN Endpoint
+	 * Descriptor
+	 */
+	.head = {
+		.bLength = sizeof(struct usb_midi_endpoint_descriptor),
+		.bDescriptorType = USB_AUDIO_DT_CS_ENDPOINT,
+		.bDescriptorSubType = USB_MIDI_SUBTYPE_MS_GENERAL,
+		.bNumEmbMIDIJack = 1,
+	},
+	.jack[0] = {
+		.baAssocJackID = 0x03,
+	},
+} };
 
+/*
+ * Standard endpoint descriptors
+ */
+static const struct usb_endpoint_descriptor bulk_endp[] = {{
+	/* Table B-11: MIDI Adapter Standard Bulk OUT Endpoint Descriptor */
+	.bLength = USB_DT_ENDPOINT_SIZE,
+	.bDescriptorType = USB_DT_ENDPOINT,
+	.bEndpointAddress = 0x01,
+	.bmAttributes = USB_ENDPOINT_ATTR_BULK,
+	.wMaxPacketSize = 0x40,
+	.bInterval = 0x00,
+
+	.extra = &midi_bulk_endp[0],
+	.extralen = sizeof(midi_bulk_endp[0])
+}, {
+	.bLength = USB_DT_ENDPOINT_SIZE,
+	.bDescriptorType = USB_DT_ENDPOINT,
+	.bEndpointAddress = 0x81,
+	.bmAttributes = USB_ENDPOINT_ATTR_BULK,
+	.wMaxPacketSize = 0x40,
+	.bInterval = 0x00,
+
+	.extra = &midi_bulk_endp[1],
+	.extralen = sizeof(midi_bulk_endp[1])
+} };
+
+/*
+ * Table B-4: MIDI Adapter Class-specific AC Interface Descriptor
+ */
+static const struct {
+	struct usb_audio_header_descriptor_head header_head;
+	struct usb_audio_header_descriptor_body header_body;
+} __attribute__((packed)) audio_control_functional_descriptors = {
+	.header_head = {
+		.bLength = sizeof(struct usb_audio_header_descriptor_head) +
+		           1 * sizeof(struct usb_audio_header_descriptor_body),
+		.bDescriptorType = USB_AUDIO_DT_CS_INTERFACE,
+		.bDescriptorSubtype = USB_AUDIO_TYPE_HEADER,
+		.bcdADC = 0x0100,
+		.wTotalLength =
+			   sizeof(struct usb_audio_header_descriptor_head) +
+			   1 * sizeof(struct usb_audio_header_descriptor_body),
+		.binCollection = 1,
+	},
+	.header_body = {
+		.baInterfaceNr = 0x01,
+	},
+};
+
+/*
+ * Table B-3: MIDI Adapter Standard AC Interface Descriptor
+ */
+static const struct usb_interface_descriptor audio_control_iface[] = {{
+	.bLength = USB_DT_INTERFACE_SIZE,
+	.bDescriptorType = USB_DT_INTERFACE,
+	.bInterfaceNumber = 0,
+	.bAlternateSetting = 0,
+	.bNumEndpoints = 0,
+	.bInterfaceClass = USB_CLASS_AUDIO,
+	.bInterfaceSubClass = USB_AUDIO_SUBCLASS_CONTROL,
+	.bInterfaceProtocol = 0,
+	.iInterface = 0,
+
+	.extra = &audio_control_functional_descriptors,
+	.extralen = sizeof(audio_control_functional_descriptors)
+} };
+
+/*
+ * Class-specific MIDI streaming interface descriptor
+ */
+static const struct {
+	struct usb_midi_header_descriptor header;
+	struct usb_midi_in_jack_descriptor in_embedded;
+	struct usb_midi_in_jack_descriptor in_external;
+	struct usb_midi_out_jack_descriptor out_embedded;
+	struct usb_midi_out_jack_descriptor out_external;
+} __attribute__((packed)) midi_streaming_functional_descriptors = {
+	/* Table B-6: Midi Adapter Class-specific MS Interface Descriptor */
+	.header = {
+		.bLength = sizeof(struct usb_midi_header_descriptor),
+		.bDescriptorType = USB_AUDIO_DT_CS_INTERFACE,
+		.bDescriptorSubtype = USB_MIDI_SUBTYPE_MS_HEADER,
+		.bcdMSC = 0x0100,
+		.wTotalLength = sizeof(midi_streaming_functional_descriptors),
+	},
+	/* Table B-7: MIDI Adapter MIDI IN Jack Descriptor (Embedded) */
+	.in_embedded = {
+		.bLength = sizeof(struct usb_midi_in_jack_descriptor),
+		.bDescriptorType = USB_AUDIO_DT_CS_INTERFACE,
+		.bDescriptorSubtype = USB_MIDI_SUBTYPE_MIDI_IN_JACK,
+		.bJackType = USB_MIDI_JACK_TYPE_EMBEDDED,
+		.bJackID = 0x01,
+		.iJack = 0x00,
+	},
+	/* Table B-8: MIDI Adapter MIDI IN Jack Descriptor (External) */
+	.in_external = {
+		.bLength = sizeof(struct usb_midi_in_jack_descriptor),
+		.bDescriptorType = USB_AUDIO_DT_CS_INTERFACE,
+		.bDescriptorSubtype = USB_MIDI_SUBTYPE_MIDI_IN_JACK,
+		.bJackType = USB_MIDI_JACK_TYPE_EXTERNAL,
+		.bJackID = 0x02,
+		.iJack = 0x00,
+	},
+	/* Table B-9: MIDI Adapter MIDI OUT Jack Descriptor (Embedded) */
+	.out_embedded = {
+		.head = {
+			.bLength = sizeof(struct usb_midi_out_jack_descriptor),
+			.bDescriptorType = USB_AUDIO_DT_CS_INTERFACE,
+			.bDescriptorSubtype = USB_MIDI_SUBTYPE_MIDI_OUT_JACK,
+			.bJackType = USB_MIDI_JACK_TYPE_EMBEDDED,
+			.bJackID = 0x03,
+			.bNrInputPins = 1,
+		},
+		.source[0] = {
+			.baSourceID = 0x02,
+			.baSourcePin = 0x01,
+		},
+		.tail = {
+			.iJack = 0x00,
+		}
+	},
+	/* Table B-10: MIDI Adapter MIDI OUT Jack Descriptor (External) */
+	.out_external = {
+		.head = {
+			.bLength = sizeof(struct usb_midi_out_jack_descriptor),
+			.bDescriptorType = USB_AUDIO_DT_CS_INTERFACE,
+			.bDescriptorSubtype = USB_MIDI_SUBTYPE_MIDI_OUT_JACK,
+			.bJackType = USB_MIDI_JACK_TYPE_EXTERNAL,
+			.bJackID = 0x04,
+			.bNrInputPins = 1,
+		},
+		.source[0] = {
+			.baSourceID = 0x01,
+			.baSourcePin = 0x01,
+		},
+		.tail = {
+			.iJack = 0x00,
+		},
+	},
+};
+
+/*
+ * Table B-5: MIDI Adapter Standard MS Interface Descriptor
+ */
+static const struct usb_interface_descriptor midi_streaming_iface[] = {{
+	.bLength = USB_DT_INTERFACE_SIZE,
+	.bDescriptorType = USB_DT_INTERFACE,
+	.bInterfaceNumber = 1,
+	.bAlternateSetting = 0,
+	.bNumEndpoints = 2,
+	.bInterfaceClass = USB_CLASS_AUDIO,
+	.bInterfaceSubClass = USB_AUDIO_SUBCLASS_MIDISTREAMING,
+	.bInterfaceProtocol = 0,
+	.iInterface = 0,
+
+	.endpoint = bulk_endp,
+
+	.extra = &midi_streaming_functional_descriptors,
+	.extralen = sizeof(midi_streaming_functional_descriptors)
+} };
+
+static const struct usb_interface ifaces[] = {{
+	.num_altsetting = 1,
+	.altsetting = audio_control_iface,
+}, {
+	.num_altsetting = 1,
+	.altsetting = midi_streaming_iface,
+} };
+
+/*
+ * Table B-2: MIDI Adapter Configuration Descriptor
+ */
+static const struct usb_config_descriptor config = {
+	.bLength = USB_DT_CONFIGURATION_SIZE,
+	.bDescriptorType = USB_DT_CONFIGURATION,
+	.wTotalLength = 0, /* can be anything, it is updated automatically
+			      when the usb code prepares the descriptor */
+	.bNumInterfaces = 2, /* control and data */
+	.bConfigurationValue = 1,
+	.iConfiguration = 0,
+	.bmAttributes = 0x80, /* bus powered */
+	.bMaxPower = 0x32,
+
+	.interface = ifaces,
+};
+
+static char usb_serial_number[25]; /* 12 bytes of desig and a \0 */
+
+static const char * usb_strings[] = {
+	"libopencm3.org",
+	"MIDI demo",
+	usb_serial_number
+};
+
+/* Buffer to be used for control requests. */
+uint8_t usbd_control_buffer[128];
+
+/* SysEx identity message, preformatted with correct USB framing information */
+const uint8_t sysex_identity[] = {
+	0x04,	/* USB Framing (3 byte SysEx) */
+	0xf0,	/* SysEx start */
+	0x7e,	/* non-realtime */
+	0x00,	/* Channel 0 */
+	0x04,	/* USB Framing (3 byte SysEx) */
+	0x7d,	/* Educational/prototype manufacturer ID */
+	0x66,	/* Family code (byte 1) */
+	0x66,	/* Family code (byte 2) */
+	0x04,	/* USB Framing (3 byte SysEx) */
+	0x51,	/* Model number (byte 1) */
+	0x19,	/* Model number (byte 2) */
+	0x00,	/* Version number (byte 1) */
+	0x04,	/* USB Framing (3 byte SysEx) */
+	0x00,	/* Version number (byte 2) */
+	0x01,	/* Version number (byte 3) */
+	0x00,	/* Version number (byte 4) */
+	0x05,	/* USB Framing (1 byte SysEx) */
+	0xf7,	/* SysEx end */
+	0x00,	/* Padding */
+	0x00,	/* Padding */
+};
+
+static void usbmidi_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
+{
+	(void)ep;
+
+	char buf[64];
+	int len = usbd_ep_read_packet(usbd_dev, 0x01, buf, 64);
+
+	/* This implementation treats any message from the host as a SysEx
+	 * identity request. This works well enough providing the host
+	 * packs the identify request in a single 8 byte USB message.
+	 */
+	if (len) {
+		while (usbd_ep_write_packet(usbd_dev, 0x81, sysex_identity,
+					    sizeof(sysex_identity)) == 0);
+	}
+
+	gpio_toggle(GPIOC, GPIO5);
+}
+
+static void usbmidi_set_config(usbd_device *usbd_dev, uint16_t wValue)
+{
+	(void)wValue;
+
+	usbd_ep_setup(usbd_dev, 0x01, USB_ENDPOINT_ATTR_BULK, 64,
+			usbmidi_data_rx_cb);
+	usbd_ep_setup(usbd_dev, 0x81, USB_ENDPOINT_ATTR_BULK, 64, NULL);
+}
+
+static void button_send_event(usbd_device *usbd_dev, int pressed)
+{
+	char buf[4] = { 0x08, /* USB framing: virtual cable 0, note on */
+			0x80, /* MIDI command: note on, channel 1 */
+			60,   /* Note 60 (middle C) */
+			64,   /* "Normal" velocity */
+	};
+
+	buf[0] |= pressed;
+	buf[1] |= pressed << 4;
+
+	while (usbd_ep_write_packet(usbd_dev, 0x81, buf, sizeof(buf)) == 0);
+}
+
+static void button_poll(usbd_device *usbd_dev)
+{
+	static uint32_t button_state = 0;
+
+	/* This is a simple shift based debounce. It's simplistic because
+	 * although this implements debounce adequately it does not have any
+	 * noise suppression. It is also very wide (32-bits) because it can
+	 * be polled in a very tight loop (no debounce timer).
+	 */
+	uint32_t old_button_state = button_state;
+	button_state = (button_state << 1) | (!gpio_get(GPIOA, GPIO0) ? 1: 0 );
+	if ((0 == button_state) != (0 == old_button_state)) {
+		button_send_event(usbd_dev, !!button_state);
+	}
+}
 
 int main(void)
 {
-	clock_setup();
-	gpio_setup();
-	delay_init(SYS_CLOCK_MHZ);
+	usbd_device *usbd_dev;
 
-        rcc_periph_clock_enable(RCC_TIM3);
-        rcc_periph_clock_enable(RCC_TIM4);
-        rcc_periph_clock_enable(RCC_GPIOB);
+	rcc_clock_setup_pll(&rcc_hse_25mhz_3v3[RCC_CLOCK_3V3_96MHZ]);
 
-	/* Set up timer 3 in enocder mode */
-        timer_slave_set_mode(TIM3, 0x3); // encoder
-        timer_ic_set_input(TIM3, TIM_IC1, TIM_IC_IN_TI1);
-        timer_ic_set_input(TIM3, TIM_IC2, TIM_IC_IN_TI2);
-        timer_enable_counter(TIM3);
-
-        // Configure PB4 (TIM3_CH1) and PB5 (TIM3_CH2) as AF
-        gpio_mode_setup(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO4 | GPIO5);
-        gpio_set_af(GPIOB, GPIO_AF2, GPIO4 | GPIO5);  // AF2 = TIM3
-
-
-	/* Set up timer 4 in enocder mode */
-        timer_slave_set_mode(TIM4, 0x3); // encoder
-        timer_ic_set_input(TIM4, TIM_IC1, TIM_IC_IN_TI1);
-        timer_ic_set_input(TIM4, TIM_IC2, TIM_IC_IN_TI2);
-        timer_enable_counter(TIM4);
-
-
-        // Configure PB6 (TIM4_CH1) and PB7 (TIM4_CH2) as AF
-        gpio_mode_setup(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO6 | GPIO7);
-        gpio_set_af(GPIOB, GPIO_AF2, GPIO6 | GPIO7);  // AF2 = TIM4
-
-
-	/* enable LED (GPIOC, GPIO13) to show the entry of main: */
-	gpio_clear(GPIOC, GPIO13);
-
-	/* initialize USB serial: */
-	USB_Serial_init();
-
-	/* disable LED to show that USB serial initialized successfully: */
-	gpio_set(GPIOC, GPIO13);
-
-	/* test functions of USB serial write: */
-	USB_Serial_write("Hello world!\n");
-
-	char test[] = {"\nThis is a test to check if splitting into several tx-packages is working properly!\n"};
-	USB_Serial_write(test);
-
-	USB_Serial_write_u32((uint32_t)123456);
-	USB_Serial_write_u32(123456U);
-
-	/* blink LED to indicate that everything finished: */
-	USB_Serial_write("\nTest finished -> start blinking...");
-
-
-	uint32_t encoder1, encoder2;
-	while (1)
-	{
-	        encoder1 = timer_get_counter(TIM3);
-	        encoder2 = timer_get_counter(TIM4);
-		USB_Serial_write_u32(encoder1);
-		USB_Serial_write_u32(encoder2);
-		USB_Serial_write("\n");
-		gpio_toggle(GPIOC, GPIO13);
-		delay_ms(300);
-	}
-
-	return 0;
-}
-
-
-static void clock_setup(void)
-{
-	#if (SYS_CLOCK_MHZ == (100U))
-		const struct rcc_clock_scale rcc_hse_25mhz_3v3_100MHz = {
-			.pllm = 12,
-			.plln = 96,
-			.pllp = 2,
-			.pllq = 4,
-			.pllr = 0,
-			.pll_source = RCC_CFGR_PLLSRC_HSE_CLK,
-			.hpre = RCC_CFGR_HPRE_DIV_NONE,
-			.ppre1 = RCC_CFGR_PPRE_DIV_2,
-			.ppre2 = RCC_CFGR_PPRE_DIV_NONE,
-			.voltage_scale = PWR_SCALE1,
-			.flash_config = FLASH_ACR_DCEN | FLASH_ACR_ICEN | FLASH_ACR_LATENCY_3WS,
-			.ahb_frequency  = 100000000,
-			.apb1_frequency = 50000000,
-			.apb2_frequency = 100000000
-		};
-		/* set STM32 to 100 MHz: */
-		rcc_clock_setup_pll(&rcc_hse_25mhz_3v3_100MHz);
-
-	#elif (SYS_CLOCK_MHZ == (96U))
-		const struct rcc_clock_scale rcc_hse_25mhz_3v3_96MHz = {
-			.pllm = 25,
-			.plln = 192,
-			.pllp = 2,
-			.pllq = 4,
-			.pllr = 0,
-			.pll_source = RCC_CFGR_PLLSRC_HSE_CLK,
-			.hpre = RCC_CFGR_HPRE_DIV_NONE,
-			.ppre1 = RCC_CFGR_PPRE_DIV_2,
-			.ppre2 = RCC_CFGR_PPRE_DIV_NONE,
-			.voltage_scale = PWR_SCALE1,
-			.flash_config = FLASH_ACR_DCEN | FLASH_ACR_ICEN | FLASH_ACR_LATENCY_3WS,
-			.ahb_frequency  = 96000000,
-			.apb1_frequency = 48000000,
-			.apb2_frequency = 96000000
-		};
-		/* set STM32 to 100 MHz: */
-		rcc_clock_setup_pll(&rcc_hse_25mhz_3v3_96MHz);
-
-	#elif (SYS_CLOCK_MHZ == (84U))
-		/* set STM32 to 84 MHz: */
-		rcc_clock_setup_pll(&rcc_hse_25mhz_3v3[RCC_CLOCK_3V3_84MHZ]);
-
-	#else
-		#error "wrong SYS_CLOCK_MHZ selected"
-
-	#endif
-
-	/* enable GPIO clock: */
-	rcc_periph_clock_enable(RCC_GPIOC); // PORT C for LED
-	rcc_periph_clock_enable(RCC_GPIOA); // PORT A for USB
-
-	/* set clock source for systick counter: */
-	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB);
-
-	/* enable clock for USB: */
+	rcc_periph_clock_enable(RCC_GPIOA);
 	rcc_periph_clock_enable(RCC_OTGFS);
-}
+
+	/* USB pins */
+	gpio_mode_setup(GPIOA, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO11 | GPIO12);
+	gpio_set_af(GPIOA, GPIO_AF10, GPIO11 | GPIO12);
 
 
-static void gpio_setup(void)
-{
-	/* configure LED pin: */
-	gpio_mode_setup(GPIOC, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO13);
 
-	/* configure USB pins */
- 	/* Configure Port A Pin 9 as an high-output as VBUS sensing is enabled but 
+        /* configure USB pins */
+        /* Configure Port A Pin 9 as an high-output as VBUS sensing is enabled but
            it is not connected to VBUS on the blackpill */
-        /* VBUS sensing can also be disabled in /lib/usb/usb_f107.c by the inclusion of the following 
+        /* VBUS sensing can also be disabled in /lib/usb/usb_f107.c by the inclusion of the following
            OTG_FS_GCCFG |= OTG_GCCFG_NOVBUSSENS;
            after setting up the USB OTG registers */
 
-	gpio_mode_setup(GPIOA,  GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO9);
+        gpio_mode_setup(GPIOA,  GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO9);
         gpio_set(GPIOA, GPIO9);
 
-	gpio_mode_setup(GPIOA,  GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO11|GPIO12);
-        gpio_set_af(GPIOA, GPIO_AF10, GPIO11|GPIO12);
+
+	desig_get_unique_id_as_string(usb_serial_number, sizeof(usb_serial_number));
+
+	/* Button pin */
+	gpio_mode_setup(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO0);
+
+	usbd_dev = usbd_init(&otgfs_usb_driver, &dev, &config,
+			usb_strings, 3,
+			usbd_control_buffer, sizeof(usbd_control_buffer));
+
+	usbd_register_set_config_callback(usbd_dev, usbmidi_set_config);
+
+	while (1) {
+		usbd_poll(usbd_dev);
+		button_poll(usbd_dev);
+	}
 }
