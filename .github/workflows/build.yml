@@ -31,9 +31,9 @@ jobs:
     - name: Build product
       run: make -C src
 
-     - name: Upload firmware artifacts
-       uses: actions/upload-artifact@v3
-       with:
+    - name: Upload firmware artifacts
+      uses: actions/upload-artifact@v3
+      with:
           name: firmware
           path: |
             src/*.elf
